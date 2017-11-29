@@ -1,7 +1,6 @@
 (ns heron.core-test
   (:require
    [clojure.test :refer :all]
-   [heron.core :refer :all]
    [rhizome.viz :as viz])
   (:import
    [io.lacuna.bifurcan
@@ -11,8 +10,14 @@
     AutomatonBuilder
     State]))
 
-(defn match [s]
-  (.matchAll (AutomatonBuilder.) s))
+(defn any []
+  (AutomatonBuilder/any))
+
+(defn match [& s]
+  (let [b (AutomatonBuilder.)]
+    (doseq [x s]
+      (.match b x))
+    b))
 
 (defn ->seq [^Iterable x]
   (when x
@@ -20,24 +25,30 @@
 
 (defn view [^AutomatonBuilder builder]
   (viz/view-graph
-    (-> builder .states ->seq)
+    (cons nil (-> builder .states ->seq))
     (fn [^State s]
-      (concat
-        (-> s .transitions .keys ->seq)
-        (-> s .epsilonTransitions ->seq)
-        (when-let [d (.defaultTransition s)]
-          [d])))
-    :options {:dpi 100}
+      (if (nil? s)
+        [(.init builder)]
+        (concat
+          (-> s .downstreamStates ->seq)
+          (-> s .epsilonTransitions ->seq)
+          (-> s .defaultTransitions ->seq))))
+    :options {:dpi 75}
     :vertical? false
     :node->descriptor (fn [^State s]
-                        {:shape :circle
-                         :peripheries (when (-> builder .accept (.contains s)) 2)
-                         :label (when (= State/REJECT s) "REJ")})
+                        (if (nil? s)
+                          {:width 0, :shape :plaintext}
+                          {:shape :circle
+                           :peripheries (when (-> builder .accept (.contains s)) 2)
+                           :label (if (= State/REJECT s)
+                                    "REJ"
+                                    (str s))}))
     :edge->descriptor (fn [^State a ^State b]
-                        (let [signals (concat
-                                        (-> a .transitions (.get b nil) ->seq)
-                                        (when (some-> a .epsilonTransitions (.contains b))
-                                          ["\u03B5"])
-                                        (when (= b (.defaultTransition b))
-                                          ["DEF"]))]
-                          {:label (->> signals (interpose ", ") (apply str))}))))
+                        (when a
+                          (let [signals (concat
+                                          (-> a (.signals b) ->seq)
+                                          (when (-> a .epsilonTransitions (.contains b))
+                                            ["\u03B5"])
+                                          (when (-> a .defaultTransitions (.contains b))
+                                            ["DEF"]))]
+                            {:label (->> signals (interpose ", ") (apply str))})))))

@@ -1,9 +1,6 @@
 package io.lacuna.heron;
 
-import io.lacuna.bifurcan.LinearMap;
-import io.lacuna.bifurcan.LinearSet;
-import io.lacuna.bifurcan.Maps;
-import io.lacuna.bifurcan.Sets;
+import io.lacuna.bifurcan.*;
 
 import java.util.function.Function;
 
@@ -12,52 +9,74 @@ import java.util.function.Function;
  */
 public class AutomatonBuilder<S, T> {
 
-  public LinearSet<State<S, T>> states, init, accept;
+  public State<S, T> init;
+  public LinearSet<State<S, T>> states, accept;
 
   public AutomatonBuilder() {
     State<S, T> s = new State();
 
-    init = LinearSet.of(s);
-    accept = init.clone();
-    states = init.clone();
+    init = s;
+    accept = LinearSet.of(s);
+    states = accept.clone();
   }
 
-  private AutomatonBuilder(LinearSet<State<S, T>> states, LinearSet<State<S, T>> init, LinearSet<State<S, T>> accept) {
-    this.states = states;
+  private AutomatonBuilder(State<S, T> init, LinearSet<State<S, T>> states, LinearSet<State<S, T>> accept) {
     this.init = init;
+    this.states = states;
     this.accept = accept;
   }
 
-  ///
+  /// combinators
+
+  public static <S, T> AutomatonBuilder<S, T> any() {
+    State<S, T> a = new State<>();
+    State<S, T> b = new State<>();
+    a.addDefault(b);
+
+    return new AutomatonBuilder<>(a, LinearSet.of(a, b), LinearSet.of(b));
+  }
+
+  public static <S, T> AutomatonBuilder<S, T> none() {
+    State<S, T> a = new State<>();
+    a.addDefault(State.REJECT);
+
+    return new AutomatonBuilder<S, T>(a, LinearSet.of(a, State.REJECT), LinearSet.of());
+  }
+
+  public AutomatonBuilder tag(T tag) {
+    accept.forEach(s -> s.addTag(tag));
+
+    return this;
+  }
 
   public AutomatonBuilder match(S signal) {
     State<S, T> newState = new State<>();
     states.add(newState);
-    accept.forEach(s -> s.transition(signal, newState));
+    accept.forEach(s -> s.addTransition(signal, newState));
     accept = LinearSet.of(newState);
 
     return this;
   }
 
-  public AutomatonBuilder matchAll(Iterable<S> signals) {
-    signals.forEach(this::match);
+  public AutomatonBuilder not(S signal) {
+    State<S, T> newAccept = new State<>();
+    for (State<S, T> s : accept) {
+      s.addTransition(signal, State.REJECT);
+      s.addDefault(newAccept);
+    }
+
+    accept = LinearSet.of(newAccept);
+    states.add(newAccept);
+    states.add(State.REJECT);
 
     return this;
   }
 
-  public AutomatonBuilder tag(T tag) {
-    accept.forEach(s -> s.tag(tag));
-
-    return this;
-  }
-
-  public AutomatonBuilder concat(AutomatonBuilder<S, T> builder) {
+  public AutomatonBuilder<S, T> concat(AutomatonBuilder<S, T> builder) {
     builder = builder.clone();
 
     for (State<S, T> a : accept) {
-      for (State<S, T> b : builder.init) {
-        a.epsilonTransition(b);
-      }
+      a.addEpsilon(builder.init);
     }
 
     builder.states.forEach(states::add);
@@ -66,17 +85,46 @@ public class AutomatonBuilder<S, T> {
     return this;
   }
 
+  public AutomatonBuilder<S, T> maybe() {
+    accept.add(init);
+
+    return this;
+  }
+
+  public AutomatonBuilder<S, T> kleene() {
+    accept.forEach(s -> s.addEpsilon(init));
+    accept.add(init);
+
+    return this;
+  }
+
+  ///
+
+  public void toDFA() {
+
+    LinearMap<ISet<State<S, T>>, State<S, T>> cache = new LinearMap<>();
+
+    this.init = State.merge(LinearSet.of(init), State::epsilonClosure, cache);
+
+    this.accept = cache.stream()
+            .filter(e -> e.key().containsAny(this.accept))
+            .map(e -> e.value())
+            .collect(Sets.linearCollector());
+
+    this.states = LinearSet.from(cache.values());
+  }
+
+
   ///
 
   @Override
   public AutomatonBuilder<S, T> clone() {
-    LinearMap<State<S, T>, State<S, T>> clonedStates = states.stream().collect(Maps.linearCollector(s -> s, State::clone));
-    Function<State<S, T>, State<S, T>> cloned = s -> clonedStates.get(s).get();
-    clonedStates.values().forEach(s -> s.remap(cloned));
+
+    Function<State<S, T>, State<S, T>> generator = Utils.memoize(s -> new State<>());
 
     return new AutomatonBuilder<>(
-            LinearSet.from(clonedStates.values()),
-            init.stream().map(cloned).collect(Sets.linearCollector()),
-            accept.stream().map(cloned).collect(Sets.linearCollector()));
+            generator.apply(init),
+            Utils.map(states, s -> s.clone(generator)),
+            Utils.map(accept, s -> s.clone(generator)));
   }
 }
