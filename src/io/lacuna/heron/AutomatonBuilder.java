@@ -1,7 +1,9 @@
 package io.lacuna.heron;
 
 import io.lacuna.bifurcan.*;
+import io.lacuna.bifurcan.IMap.IEntry;
 
+import java.util.Objects;
 import java.util.function.Function;
 
 /**
@@ -82,11 +84,15 @@ public class AutomatonBuilder<S, T> {
     builder.states.forEach(states::add);
     accept = builder.accept;
 
+    toDFA();
+
     return this;
   }
 
   public AutomatonBuilder<S, T> maybe() {
     accept.add(init);
+
+    toDFA();
 
     return this;
   }
@@ -94,6 +100,98 @@ public class AutomatonBuilder<S, T> {
   public AutomatonBuilder<S, T> kleene() {
     accept.forEach(s -> s.addEpsilon(init));
     accept.add(init);
+
+    //toDFA();
+
+    return this;
+  }
+
+  public AutomatonBuilder<S, T> union(AutomatonBuilder<S, T> builder) {
+
+    toDFA();
+    AutomatonBuilder<S, T> b = builder.clone();
+    b.toDFA();
+
+    LinearMap<IList<State<S, T>>, State<S, T>> cache = new LinearMap<>();
+
+    this.init = State.join(
+            LinearList.of(init, b.init),
+            t -> State.REJECT == t.nth(0) && State.REJECT == t.nth(1),
+            cache);
+
+    this.states = states.union(b.states).union(LinearSet.from(cache.values()));
+
+    this.accept = cache.stream()
+            .filter(e -> accept.contains(e.key().nth(0)) || b.accept.contains(e.key().nth(1)))
+            .map(IEntry::value)
+            .collect(Sets.linearCollector())
+            .union(this.accept)
+            .union(b.accept);
+
+    if (accept.contains(State.REJECT)) {
+      throw new IllegalStateException();
+    }
+
+    toDFA();
+
+    return this;
+  }
+
+  public AutomatonBuilder<S, T> intersection(AutomatonBuilder<S, T> builder) {
+
+    toDFA();
+    AutomatonBuilder<S, T> b = builder.clone();
+    b.toDFA();
+
+    LinearMap<IList<State<S, T>>, State<S, T>> cache = new LinearMap<>();
+
+    this.init = State.join(
+            LinearList.of(init, b.init),
+            t -> State.REJECT == t.nth(0) || State.REJECT == t.nth(1),
+            cache);
+
+    this.states = this.states.union(b.states).union(LinearSet.from(cache.values()));
+
+    this.accept = cache.stream()
+            .filter(e -> accept.contains(e.key().nth(0)) && b.accept.contains(e.key().nth(1)))
+            .map(IEntry::value)
+            .collect(Sets.linearCollector());
+
+    if (accept.contains(State.REJECT)) {
+      throw new IllegalStateException();
+    }
+
+    toDFA();
+
+    return this;
+  }
+
+  public AutomatonBuilder<S, T> difference(AutomatonBuilder<S, T> builder) {
+
+    toDFA();
+    AutomatonBuilder<S, T> b = builder.clone();
+    b.toDFA();
+
+    LinearMap<IList<State<S, T>>, State<S, T>> cache = new LinearMap<>();
+
+    this.init = State.join(
+            LinearList.of(init, b.init),
+            t -> State.REJECT == t.nth(0),
+            cache);
+
+    this.states = this.states.union(b.states).union(LinearSet.from(cache.values()));
+
+    this.accept = cache.entries().stream()
+            .filter(e -> accept.contains(e.key().nth(0)) && !b.accept.contains(e.key().nth(1)))
+            .map(IEntry::value)
+            .collect(Sets.linearCollector())
+            .union(this.accept);
+
+    if (accept.contains(State.REJECT)) {
+      throw new IllegalStateException();
+    }
+
+    toDFA();
 
     return this;
   }
@@ -114,17 +212,15 @@ public class AutomatonBuilder<S, T> {
     this.states = LinearSet.from(cache.values());
   }
 
-
   ///
 
   @Override
   public AutomatonBuilder<S, T> clone() {
-
-    Function<State<S, T>, State<S, T>> generator = Utils.memoize(s -> new State<>());
+    LinearMap<State<S, T>, State<S, T>> cache = new LinearMap<>();
 
     return new AutomatonBuilder<>(
-            generator.apply(init),
-            Utils.map(states, s -> s.clone(generator)),
-            Utils.map(accept, s -> s.clone(generator)));
+            init.clone(cache),
+            Utils.map(states, s -> s.clone(cache)),
+            Utils.map(accept, s -> s.clone(cache)));
   }
 }

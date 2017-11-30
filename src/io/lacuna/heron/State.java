@@ -2,8 +2,13 @@ package io.lacuna.heron;
 
 import io.lacuna.bifurcan.*;
 
+import java.util.Iterator;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BiFunction;
+import java.util.function.BinaryOperator;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * @param <T> the tags applied to the state
@@ -58,6 +63,9 @@ public class State<S, T> {
   }
 
   public void addTransition(S signal, State<S, T> state) {
+    if (this == State.REJECT) {
+      throw new IllegalStateException();
+    }
     transitions.update(signal, s -> (s == null ? new LinearSet<State<S, T>>() : s).add(state));
   }
 
@@ -65,8 +73,8 @@ public class State<S, T> {
     return transitions.keys();
   }
 
-  public ISet<State<S, T>> transition(S signal) {
-    return transitions.get(signal).get();
+  public ISet<State<S, T>> transitions(S signal) {
+    return transitions.get(signal).orElse(Sets.EMPTY);
   }
 
   public ISet<S> signals(State<S, T> state) {
@@ -103,71 +111,170 @@ public class State<S, T> {
   }
 
   private void epsilonClosure(LinearSet<State<S, T>> accumulator) {
-    accumulator.add(this);
-    if (epsilonTransitions != null) {
-      epsilonTransitions.forEach(s -> s.epsilonClosure(accumulator));
+    if (!accumulator.contains(this)) {
+      accumulator.add(this);
+      if (epsilonTransitions != null) {
+        epsilonTransitions.forEach(s -> s.epsilonClosure(accumulator));
+      }
     }
+  }
+
+  static <S, T> State<S, T> join(
+          IList<State<S, T>> init,
+          Predicate<IList<State<S, T>>> isReject,
+          IMap<IList<State<S, T>>, State<S, T>> cache) {
+
+    LinearList<IList<State<S, T>>> queue = new LinearList<>();
+
+    Function<IList<State<S, T>>, State<S, T>> enqueue = pair -> {
+      Optional<State<S, T>> s = cache.get(pair);
+      if (s.isPresent()) {
+        return s.get();
+      } else {
+        State<S, T> state = isReject.test(pair) ? State.REJECT : new State<>();
+        cache.put(pair, state);
+        if (state != State.REJECT) {
+          queue.addLast(pair);
+        }
+
+        return state;
+      }
+    };
+
+    BinaryOperator<ISet<State<S, T>>> join = (a, b) -> {
+      if (a.size() == 0) {
+        return b;
+      } else if (b.size() == 0) {
+        return a;
+      } else {
+        IList<State<S, T>> t = LinearList.of(a.elements().first(), b.elements().first());
+        return LinearSet.of(enqueue.apply(t));
+      }
+    };
+
+    enqueue.apply(init);
+
+    while (queue.size() > 0) {
+      IList<State<S, T>> pair = queue.popLast();
+
+      State<S, T> joined = cache.get(pair).get();
+      State<S, T> a = pair.nth(0);
+      State<S, T> b = pair.nth(1);
+
+      joined.transitions = a.transitions.merge(b.transitions, join);
+      if (a.defaultTransitions != null) {
+        b.transitions
+                .difference(a.transitions)
+                .forEach(e -> joined.transitions.put(e.key(), join.apply(e.value(), a.defaultTransitions), ISet::union));
+      }
+      if (b.defaultTransitions != null) {
+        a.transitions
+                .difference(b.transitions)
+                .forEach(e -> joined.transitions.put(e.key(), join.apply(e.value(), b.defaultTransitions), ISet::union));
+      }
+
+      a.tags().union(b.tags()).forEach(joined::addTag);
+
+      join.apply(a.defaultTransitions(), b.defaultTransitions()).forEach(joined::addDefault);
+    }
+
+    return cache.get(init).get();
   }
 
   static <S, T> State<S, T> merge(
-          ISet<State<S, T>> states,
+          ISet<State<S, T>> init,
           Function<State<S, T>, ISet<State<S, T>>> epsilonClosure,
           IMap<ISet<State<S, T>>, State<S, T>> cache) {
 
-    if (states.contains(State.REJECT)) {
-      return State.REJECT;
+    LinearList<ISet<State<S, T>>> queue = new LinearList<>();
+
+    Function<ISet<State<S, T>>, State<S, T>> enqueue = states -> {
+
+      states = states.stream()
+              .map(epsilonClosure)
+              .flatMap(ISet::stream)
+              .collect(Sets.linearCollector());
+
+      Optional<State<S, T>> s = cache.get(states);
+      if (s.isPresent()) {
+        return s.get();
+      } else {
+        State<S, T> state = states.size() == 1 && states.contains(State.REJECT) ? State.REJECT : new State<>();
+        cache.put(states, state);
+        if (state != State.REJECT) {
+          queue.addLast(states);
+        }
+
+        return state;
+      }
+    };
+
+    enqueue.apply(init);
+
+    while (queue.size() > 0) {
+
+      ISet<State<S, T>> states = queue.popLast();
+      State<S, T> merged = cache.get(states).get();
+
+      // merge tags
+      states.stream().map(State::tags).flatMap(ISet::stream).forEach(merged::addTag);
+
+      // merge default transitions
+      ISet<State<S, T>> defaultStates = states.stream()
+              .map(State::defaultTransitions)
+              .flatMap(ISet::stream)
+              .collect(Sets.linearCollector());
+      if (defaultStates.size() > 0) {
+        merged.addDefault(enqueue.apply(defaultStates));
+      }
+
+      // merge other transitions
+      LinearMap<S, ISet<State<S, T>>> transitions = states.stream()
+              .map(s -> s.transitions)
+              .reduce((a, b) -> a.merge(b, ISet::union))
+              .orElseGet(LinearMap::new);
+
+      for (State<S, T> s : states) {
+        if (s.defaultTransitions().size() > 0) {
+          transitions = transitions.merge(transitions.difference(s.transitions), (a, b) -> a.union(s.defaultTransitions()));
+        }
+      }
+
+      merged.transitions = Utils.mapVals(transitions, s -> LinearSet.of(enqueue.apply(s)));
     }
 
-    // expand states per epsilon transitions
-    states = states.stream()
-            .map(epsilonClosure)
-            .flatMap(ISet::stream)
-            .collect(Sets.linearCollector());
-
-    if (cache.contains(states)) {
-      return cache.get(states).get();
-    }
-
-    State<S, T> merged = new State<>();
-    cache.put(states, merged);
-
-    // merge default transitions
-    ISet<State<S, T>> defaultStates = states.stream()
-            .map(State::defaultTransitions)
-            .flatMap(ISet::stream)
-            .collect(Sets.linearCollector());
-    if (defaultStates.size() > 0) {
-      merged.addDefault(merge(defaultStates, epsilonClosure, cache));
-    }
-
-    // merge other transitions
-    states.stream()
-            .map(s -> s.transitions)
-            .reduce((a, b) -> a.merge(b, ISet::union))
-            .get()
-            .forEach(e -> merged.addTransition(e.key(), merge(e.value(), epsilonClosure, cache)));
-
-    return merged;
+    return enqueue.apply(init);
   }
 
-  State<S, T> clone(Function<State<S, T>, State<S, T>> generator) {
+  State<S, T> clone(IMap<State<S, T>, State<S, T>> cache) {
 
-    State<S, T> state = generator.apply(this);
-    state.transitions = Utils.mapVals(transitions, s -> Utils.map(s, generator));
-    state.tags = tags == null ? null : tags.clone();
-    state.epsilonTransitions = Utils.map(epsilonTransitions, generator);
-    state.defaultTransitions = Utils.map(defaultTransitions, generator);
+    if (this == State.REJECT) {
+      return this;
+    }
 
-    return state;
+    Optional<State<S, T>> opt = cache.get(this);
+    if (opt.isPresent()) {
+      return opt.get();
+    } else {
+      State<S, T> newState = new State<>();
+      cache.put(this, newState);
+
+      newState.transitions = Utils.mapVals(transitions, set -> Utils.map(set, s -> s.clone(cache)));
+      newState.tags = tags == null ? null : tags.clone();
+      newState.epsilonTransitions = Utils.map(epsilonTransitions, s -> s.clone(cache));
+      newState.defaultTransitions = Utils.map(defaultTransitions, s -> s.clone(cache));
+
+      return newState;
+    }
   }
 
   @Override
   public String toString() {
     StringBuilder sb = new StringBuilder("state(" + id + ")[");
-    if (tags != null) {
+    if (tags().size() > 0) {
       tags.forEach(t -> sb.append(t + ", "));
+      sb.delete(sb.length() - 2, sb.length());
     }
-    sb.delete(sb.length() - 2, sb.length());
     sb.append("]");
     return sb.toString();
   }

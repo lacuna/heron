@@ -33,4 +33,16 @@ public class Utils {
                     e -> f.apply(e.value()),
                     (int) map.size()));
   }
+
+  public static <V> IList<IList<V>> cartesianPairs(ISet<V> a, ISet<V> b) {
+    IList<IList<V>> pairs = new LinearList<>();
+    for (V x : a) {
+      for (V y : b) {
+        if (!x.equals(y)) {
+          pairs.addLast(LinearList.of(x, y));
+        }
+      }
+    }
+    return pairs;
+  }
 }

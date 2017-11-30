@@ -4,11 +4,13 @@
    [rhizome.viz :as viz])
   (:import
    [io.lacuna.bifurcan
+    Set
     ISet
     IList]
    [io.lacuna.heron
     AutomatonBuilder
-    State]))
+    State
+    Utils]))
 
 (defn any []
   (AutomatonBuilder/any))

@@ -6,4 +6,7 @@
   :java-source-paths ["src"]
   :profiles {:dev {:dependencies [[org.clojure/clojure "1.8.0"]
                                   [rhizome "0.2.9"]
-                                  [virgil "0.1.7"]]}})
+                                  [virgil "0.1.7"]
+                                  [org.clojure/test.check "0.9.0"]]}}
+
+  :jvm-opts ^:replace ["-server" "-XX:+UseG1GC" "-Xmx1g" "-XX:-OmitStackTraceInFastThrow"])
