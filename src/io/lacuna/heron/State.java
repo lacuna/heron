@@ -5,10 +5,7 @@ import io.lacuna.bifurcan.*;
 import java.util.Iterator;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.BiFunction;
-import java.util.function.BinaryOperator;
-import java.util.function.Function;
-import java.util.function.Predicate;
+import java.util.function.*;
 
 /**
  * @param <T> the tags applied to the state
@@ -22,19 +19,19 @@ public class State<S, T> {
 
   final long id = COUNTER.incrementAndGet();
 
-  private LinearMap<S, ISet<State<S, T>>> transitions;
-  private LinearSet<State<S, T>> epsilonTransitions = null;
-  private LinearSet<State<S, T>> defaultTransitions = null;
-  private LinearSet<T> tags = null;
+  IMap<S, ISet<State<S, T>>> transitions;
+  private ISet<State<S, T>> epsilonTransitions = null;
+  private ISet<State<S, T>> defaultTransitions = null;
+  private ISet<T> tags = null;
 
   public State() {
     this(new LinearMap<>(), null, null, null);
   }
 
-  State(LinearMap<S, ISet<State<S, T>>> transitions,
-        LinearSet<T> tags,
-        LinearSet<State<S, T>> epsilonTransitions,
-        LinearSet<State<S, T>> defaultTransitions) {
+  State(IMap<S, ISet<State<S, T>>> transitions,
+        ISet<T> tags,
+        ISet<State<S, T>> epsilonTransitions,
+        ISet<State<S, T>> defaultTransitions) {
     this.transitions = transitions;
     this.tags = tags;
     this.defaultTransitions = defaultTransitions;
@@ -104,9 +101,13 @@ public class State<S, T> {
 
   ////
 
-  public static <S, T> ISet<State<S, T>> epsilonClosure(State<S, T> state) {
+  static <S, T> ISet<State<S, T>> epsilonClosure(ISet<State<S, T>> states) {
+    if (states.size() == 1 && states.iterator().next().epsilonTransitions().size() == 0) {
+      return states;
+    }
+
     LinearSet<State<S, T>> accumulator = new LinearSet<>();
-    state.epsilonClosure(accumulator);
+    states.forEach(s -> s.epsilonClosure(accumulator));
     return accumulator;
   }
 
@@ -119,6 +120,9 @@ public class State<S, T> {
     }
   }
 
+  /**
+   * creates a state representing the cartesian product of two states, assumes all states are deterministic
+   */
   static <S, T> State<S, T> join(
           IList<State<S, T>> init,
           Predicate<IList<State<S, T>>> isReject,
@@ -127,6 +131,10 @@ public class State<S, T> {
     LinearList<IList<State<S, T>>> queue = new LinearList<>();
 
     Function<IList<State<S, T>>, State<S, T>> enqueue = pair -> {
+      if (pair.size() != 2) {
+        throw new IllegalStateException();
+      }
+
       Optional<State<S, T>> s = cache.get(pair);
       if (s.isPresent()) {
         return s.get();
@@ -165,12 +173,14 @@ public class State<S, T> {
       if (a.defaultTransitions != null) {
         b.transitions
                 .difference(a.transitions)
-                .forEach(e -> joined.transitions.put(e.key(), join.apply(e.value(), a.defaultTransitions), ISet::union));
+                .keys()
+                .forEach(k -> joined.transitions.put(k, a.defaultTransitions(), (x, y) -> join.apply(y, x)));
       }
       if (b.defaultTransitions != null) {
         a.transitions
                 .difference(b.transitions)
-                .forEach(e -> joined.transitions.put(e.key(), join.apply(e.value(), b.defaultTransitions), ISet::union));
+                .keys()
+                .forEach(k -> joined.transitions.put(k, b.defaultTransitions(), join));
       }
 
       a.tags().union(b.tags()).forEach(joined::addTag);
@@ -181,31 +191,31 @@ public class State<S, T> {
     return cache.get(init).get();
   }
 
+  /**
+   * merges non-deterministic sets of states into a single deterministic state
+   */
   static <S, T> State<S, T> merge(
           ISet<State<S, T>> init,
-          Function<State<S, T>, ISet<State<S, T>>> epsilonClosure,
-          IMap<ISet<State<S, T>>, State<S, T>> cache) {
+          Function<ISet<State<S, T>>, ISet<State<S, T>>> equivalentStates,
+          IMap<ISet<State<S, T>>, ISet<State<S, T>>> cache) {
 
     LinearList<ISet<State<S, T>>> queue = new LinearList<>();
 
-    Function<ISet<State<S, T>>, State<S, T>> enqueue = states -> {
+    UnaryOperator<ISet<State<S, T>>> enqueue = states -> {
 
-      states = states.stream()
-              .map(epsilonClosure)
-              .flatMap(ISet::stream)
-              .collect(Sets.linearCollector());
+      states = equivalentStates.apply(states);
 
-      Optional<State<S, T>> s = cache.get(states);
+      Optional<ISet<State<S, T>>> s = cache.get(states);
       if (s.isPresent()) {
         return s.get();
       } else {
-        State<S, T> state = states.size() == 1 && states.contains(State.REJECT) ? State.REJECT : new State<>();
-        cache.put(states, state);
-        if (state != State.REJECT) {
+        ISet<State<S, T>> newStates = states.size() == 1 && states.contains(State.REJECT) ? states : LinearSet.of(new State<>());
+        cache.put(states, newStates);
+        if (!newStates.contains(State.REJECT)) {
           queue.addLast(states);
         }
 
-        return state;
+        return newStates;
       }
     };
 
@@ -214,36 +224,60 @@ public class State<S, T> {
     while (queue.size() > 0) {
 
       ISet<State<S, T>> states = queue.popLast();
-      State<S, T> merged = cache.get(states).get();
+      ISet<State<S, T>> mergedStates = cache.get(states).get();
 
-      // merge tags
-      states.stream().map(State::tags).flatMap(ISet::stream).forEach(merged::addTag);
+      State<S, T> merged = mergedStates.iterator().next();
 
-      // merge default transitions
-      ISet<State<S, T>> defaultStates = states.stream()
-              .map(State::defaultTransitions)
-              .flatMap(ISet::stream)
-              .collect(Sets.linearCollector());
-      if (defaultStates.size() > 0) {
-        merged.addDefault(enqueue.apply(defaultStates));
-      }
+      if (states.size() == 1) {
+        State<S, T> s = states.iterator().next();
 
-      // merge other transitions
-      LinearMap<S, ISet<State<S, T>>> transitions = states.stream()
-              .map(s -> s.transitions)
-              .reduce((a, b) -> a.merge(b, ISet::union))
-              .orElseGet(LinearMap::new);
+        // tags
+        if (s.tags().size() > 0) {
+          merged.tags = LinearSet.from(s.tags);
+        }
 
-      for (State<S, T> s : states) {
-        if (s.defaultTransitions().size() > 0) {
-          transitions = transitions.merge(transitions.difference(s.transitions), (a, b) -> a.union(s.defaultTransitions()));
+        merged.defaultTransitions = s.defaultTransitions;
+
+        // other transitions
+        merged.transitions = LinearMap.from(s.transitions);
+
+      } else {
+
+        // tags
+        states.stream()
+                .map(State::tags)
+                .flatMap(ISet::stream)
+                .forEach(merged::addTag);
+
+        // default transitions
+        merged.defaultTransitions = states.stream()
+                .map(State::defaultTransitions)
+                .flatMap(ISet::stream)
+                .collect(Sets.linearCollector());
+
+        // other transitions
+        merged.transitions = states.stream()
+                .map(s -> s.transitions)
+                .reduce((a, b) -> a.merge(b, ISet::union))
+                .orElseGet(LinearMap::new);
+
+        for (State<S, T> s : states) {
+          if (s.defaultTransitions().size() > 0) {
+            merged.transitions = merged.transitions
+                    .merge(merged.transitions.difference(s.transitions),
+                            (a, b) -> a.union(s.defaultTransitions()));
+          }
         }
       }
 
-      merged.transitions = Utils.mapVals(transitions, s -> LinearSet.of(enqueue.apply(s)));
+      merged.defaultTransitions = merged.defaultTransitions().size() > 0
+              ? enqueue.apply(merged.defaultTransitions)
+              : null;
+
+      merged.transitions = Utils.mapVals(merged.transitions, enqueue);
     }
 
-    return enqueue.apply(init);
+    return enqueue.apply(init).iterator().next();
   }
 
   State<S, T> clone(IMap<State<S, T>, State<S, T>> cache) {
@@ -260,7 +294,7 @@ public class State<S, T> {
       cache.put(this, newState);
 
       newState.transitions = Utils.mapVals(transitions, set -> Utils.map(set, s -> s.clone(cache)));
-      newState.tags = tags == null ? null : tags.clone();
+      newState.tags = tags == null ? null : LinearSet.from(tags);
       newState.epsilonTransitions = Utils.map(epsilonTransitions, s -> s.clone(cache));
       newState.defaultTransitions = Utils.map(defaultTransitions, s -> s.clone(cache));
 

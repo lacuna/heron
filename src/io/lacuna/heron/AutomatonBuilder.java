@@ -13,6 +13,7 @@ public class AutomatonBuilder<S, T> {
 
   public State<S, T> init;
   public LinearSet<State<S, T>> states, accept;
+  boolean deterministic = true;
 
   public AutomatonBuilder() {
     State<S, T> s = new State();
@@ -56,6 +57,7 @@ public class AutomatonBuilder<S, T> {
     states.add(newState);
     accept.forEach(s -> s.addTransition(signal, newState));
     accept = LinearSet.of(newState);
+    deterministic = false;
 
     return this;
   }
@@ -70,6 +72,7 @@ public class AutomatonBuilder<S, T> {
     accept = LinearSet.of(newAccept);
     states.add(newAccept);
     states.add(State.REJECT);
+    deterministic = false;
 
     return this;
   }
@@ -83,16 +86,14 @@ public class AutomatonBuilder<S, T> {
 
     builder.states.forEach(states::add);
     accept = builder.accept;
-
-    toDFA();
+    deterministic = false;
 
     return this;
   }
 
   public AutomatonBuilder<S, T> maybe() {
     accept.add(init);
-
-    toDFA();
+    deterministic = false;
 
     return this;
   }
@@ -100,8 +101,9 @@ public class AutomatonBuilder<S, T> {
   public AutomatonBuilder<S, T> kleene() {
     accept.forEach(s -> s.addEpsilon(init));
     accept.add(init);
+    deterministic = false;
 
-    //toDFA();
+    toDFA();
 
     return this;
   }
@@ -132,6 +134,7 @@ public class AutomatonBuilder<S, T> {
       throw new IllegalStateException();
     }
 
+    deterministic = false;
     toDFA();
 
     return this;
@@ -161,6 +164,7 @@ public class AutomatonBuilder<S, T> {
       throw new IllegalStateException();
     }
 
+    deterministic = false;
     toDFA();
 
     return this;
@@ -191,6 +195,7 @@ public class AutomatonBuilder<S, T> {
       throw new IllegalStateException();
     }
 
+    deterministic = false;
     toDFA();
 
     return this;
@@ -200,16 +205,116 @@ public class AutomatonBuilder<S, T> {
 
   public void toDFA() {
 
-    LinearMap<ISet<State<S, T>>, State<S, T>> cache = new LinearMap<>();
+    if (deterministic) {
+      return;
+    }
+
+    LinearMap<ISet<State<S, T>>, ISet<State<S, T>>> cache = new LinearMap<>();
 
     this.init = State.merge(LinearSet.of(init), State::epsilonClosure, cache);
 
     this.accept = cache.stream()
             .filter(e -> e.key().containsAny(this.accept))
             .map(e -> e.value())
+            .flatMap(ISet::stream)
             .collect(Sets.linearCollector());
 
-    this.states = LinearSet.from(cache.values());
+    this.states = cache.values().stream()
+            .flatMap(ISet::stream)
+            .collect(Sets.linearCollector());
+
+    deterministic = true;
+  }
+
+  private IList<ISet<State<S, T>>> splitByTags(ISet<State<S, T>> states) {
+    LinearMap<ISet<T>, ISet<State<S, T>>> m = new LinearMap<>();
+    for (State<S, T> s : states) {
+      m.update(s.tags(), v -> (v == null ? new LinearSet<State<S, T>>() : v).add(s));
+    }
+    return m.values();
+  }
+
+  public void minimize() {
+
+    LinearMap<ISet<State<S, T>>, ISet<State<S, T>>> cache = new LinearMap<>();
+
+    IMap<State<S, T>, ISet<State<S, T>>> equivalent = equivalentStates();
+
+    this.init = State.merge(
+            LinearSet.of(init),
+            set -> set.stream().map(equivalent).reduce(ISet::union).get(),
+            cache);
+
+    this.accept = cache.stream()
+            .filter(e -> e.key().containsAny(this.accept))
+            .map(e -> e.value())
+            .flatMap(ISet::stream)
+            .collect(Sets.linearCollector());
+
+    this.states = cache.values().stream()
+            .flatMap(ISet::stream)
+            .collect(Sets.linearCollector());
+  }
+
+  public IMap<State<S, T>, ISet<State<S, T>>> equivalentStates() {
+
+    toDFA();
+
+    ISet<ISet<State<S, T>>> partition = LinearSet.from(splitByTags(accept).concat(splitByTags(states.difference(accept))));
+    ISet<ISet<State<S, T>>> waiting = LinearSet.of(accept);
+
+    // group states by their signals
+    IMap<S, ISet<State<S, T>>> statesBySignal = new LinearMap<>();
+    for (State<S, T> state : states) {
+      for (S signal : state.transitions.keys()) {
+        statesBySignal.update(signal, v -> (v == null ? new LinearSet<State<S, T>>() : v).add(state));
+      }
+    }
+
+    for (State<S, T> state : states) {
+      if (state.defaultTransitions().size() > 0) {
+        for (S signal : statesBySignal.difference(state.transitions).keys()) {
+          statesBySignal.update(signal, v -> v.add(state));
+        }
+      }
+    }
+
+    // refine partitions
+    // https://en.wikipedia.org/wiki/DFA_minimization#Hopcroft.27s_algorithm
+    while (waiting.size() > 0) {
+      ISet<State<S, T>> a = waiting.elements().first();
+      waiting.remove(a);
+
+      for (S signal : statesBySignal.keys()) {
+        ISet<State<S, T>> x = statesBySignal.get(signal).get().stream()
+                .filter(s -> s.transitions(signal).containsAny(a))
+                .collect(Sets.linearCollector());
+
+        for (ISet<State<S, T>> y : LinearList.from(partition.elements())) {
+          if (x.containsAny(y) && !x.containsAll(y)) {
+            ISet<State<S, T>> intersect = x.intersection(y);
+            ISet<State<S, T>> diff = y.difference(x);
+            partition.remove(y).add(intersect).add(diff);
+
+            if (waiting.contains(y)) {
+              waiting.remove(y).add(intersect).add(diff);
+            } else if (intersect.size() <= diff.size()) {
+              waiting.add(intersect);
+            } else {
+              waiting.add(diff);
+            }
+          }
+        }
+      }
+    }
+
+    LinearMap<State<S, T>, ISet<State<S, T>>> m = new LinearMap<>();
+    for (ISet<State<S, T>> set : partition) {
+      for (State<S, T> state : set) {
+        m.put(state, set);
+      }
+    }
+    return m;
   }
 
   ///

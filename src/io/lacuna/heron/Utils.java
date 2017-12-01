@@ -26,23 +26,11 @@ public class Utils {
             .collect(Sets.linearCollector());
   }
 
-  public static <K, U, V> LinearMap<K, V> mapVals(LinearMap<K, U> map, Function<U, V> f) {
+  public static <K, U, V> IMap<K, V> mapVals(IMap<K, U> map, Function<U, V> f) {
     return map.stream()
             .collect(Maps.linearCollector(
                     e -> e.key(),
                     e -> f.apply(e.value()),
                     (int) map.size()));
-  }
-
-  public static <V> IList<IList<V>> cartesianPairs(ISet<V> a, ISet<V> b) {
-    IList<IList<V>> pairs = new LinearList<>();
-    for (V x : a) {
-      for (V y : b) {
-        if (!x.equals(y)) {
-          pairs.addLast(LinearList.of(x, y));
-        }
-      }
-    }
-    return pairs;
   }
 }
