@@ -8,6 +8,9 @@
    [clojure.test :refer :all])
   (:import
    [io.lacuna.bifurcan
+    LinearSet
+    LinearList
+    Sets
     ISet
     IMap
     IList]
@@ -65,7 +68,7 @@
         (recur state' (rest inputs))
         false))))
 
-(def iterations 1e3)
+(def iterations 1e6)
 
 (defmacro def-generative-test [name [inputs & actions] & body]
   `(defspec ~name iterations
@@ -83,14 +86,11 @@
        ~@body)))
 
 (def-generative-test test-minimize [inputs actions]
-  (prn actions)
   (let [a        (construct-automaton actions)
         a'       (doto (.clone a) .minimize)
         accepted (filter #(accepts? a %) inputs)]
-    (prn (-> a .states .size) (-> a' .states .size))
-    (->> inputs
-      (filter #(accepts? a %))
-      (every? #(accepts? a' %)))))
+    (= (filter #(accepts? a %) inputs)
+      (filter #(accepts? a' %) inputs))))
 
 (def-generative-test test-kleene [inputs actions]
   (let [a        (construct-automaton actions)

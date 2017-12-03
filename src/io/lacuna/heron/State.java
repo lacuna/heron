@@ -6,12 +6,15 @@ import java.util.Iterator;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.*;
+import java.util.stream.Collectors;
 
 /**
  * @param <T> the tags applied to the state
  * @param <S> the signals that cause transitions to another state
  */
 public class State<S, T> {
+
+  public static LinearMap cache;
 
   private static final AtomicLong COUNTER = new AtomicLong();
 
@@ -63,7 +66,7 @@ public class State<S, T> {
     if (this == State.REJECT) {
       throw new IllegalStateException();
     }
-    transitions.update(signal, s -> (s == null ? new LinearSet<State<S, T>>() : s).add(state));
+    transitions.getOrCreate(signal, LinearSet::new).add(state);
   }
 
   public ISet<S> signals() {

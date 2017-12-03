@@ -4,12 +4,16 @@ import io.lacuna.bifurcan.*;
 import io.lacuna.bifurcan.IMap.IEntry;
 
 import java.util.Objects;
+import java.util.function.BiFunction;
+import java.util.function.BinaryOperator;
 import java.util.function.Function;
 
 /**
  * @author ztellman
  */
 public class AutomatonBuilder<S, T> {
+
+  private static final Object OTHER_SIGNAL = new Object();
 
   public State<S, T> init;
   public LinearSet<State<S, T>> states, accept;
@@ -226,14 +230,6 @@ public class AutomatonBuilder<S, T> {
     deterministic = true;
   }
 
-  private IList<ISet<State<S, T>>> splitByTags(ISet<State<S, T>> states) {
-    LinearMap<ISet<T>, ISet<State<S, T>>> m = new LinearMap<>();
-    for (State<S, T> s : states) {
-      m.update(s.tags(), v -> (v == null ? new LinearSet<State<S, T>>() : v).add(s));
-    }
-    return m.values();
-  }
-
   public void minimize() {
 
     LinearMap<ISet<State<S, T>>, ISet<State<S, T>>> cache = new LinearMap<>();
@@ -242,7 +238,7 @@ public class AutomatonBuilder<S, T> {
 
     this.init = State.merge(
             LinearSet.of(init),
-            set -> set.stream().map(equivalent).reduce(ISet::union).get(),
+            set -> set.stream().map(s -> equivalent.get(s).get()).reduce(ISet::union).get(),
             cache);
 
     this.accept = cache.stream()
@@ -256,63 +252,109 @@ public class AutomatonBuilder<S, T> {
             .collect(Sets.linearCollector());
   }
 
+  private ISet alphabet() {
+    LinearSet alphabet = new LinearSet().add(OTHER_SIGNAL);
+    for (State<S, T> s : states) {
+      s.transitions.keys().forEach(alphabet::add);
+    }
+    return alphabet;
+  }
+
+  private BiFunction<ISet<State<S, T>>, Object, ISet<State<S, T>>> inverseTransitions() {
+
+    ISet alphabet = alphabet();
+
+    IMap<State<S, T>, IMap<Object, ISet<State<S, T>>>> result = new LinearMap<>();
+    states.stream().forEach(s -> result.put(s, new LinearMap<>()));
+    LinearMap<Object, ISet<State<S, T>>> reject = new LinearMap<>();
+    result.put(State.REJECT, reject);
+
+    for (State<S, T> state : states) {
+      for (IEntry<S, ISet<State<S, T>>> e : state.transitions) {
+        result.get(e.value().elements().first()).get()
+                .getOrCreate(e.key(), LinearSet::new)
+                .add(state);
+      }
+
+      if (state.defaultTransitions().size() > 0) {
+        IMap<Object, ISet<State<S, T>>> t = result.get(state.defaultTransitions().elements().first()).get();
+        for (Object signal : alphabet.difference(state.transitions.keys())) {
+          t.getOrCreate(signal, LinearSet::new).add(state);
+        }
+      } else {
+        for (Object signal : alphabet.difference(state.transitions.keys())) {
+          reject.getOrCreate(signal, LinearSet::new).add(state);
+        }
+      }
+    }
+
+    return (states, signal) -> states.stream()
+            .map(s -> result.get(s).get().get(signal, (ISet<State<S, T>>) Sets.EMPTY))
+            .reduce(ISet::union)
+            .get();
+  }
+
   public IMap<State<S, T>, ISet<State<S, T>>> equivalentStates() {
 
     toDFA();
 
-    ISet<ISet<State<S, T>>> partition = LinearSet.from(splitByTags(accept).concat(splitByTags(states.difference(accept))));
-    ISet<ISet<State<S, T>>> waiting = LinearSet.of(accept);
+    BiFunction<ISet<State<S, T>>, Object, ISet<State<S, T>>> inverseTransitions = inverseTransitions();
 
-    // group states by their signals
-    IMap<S, ISet<State<S, T>>> statesBySignal = new LinearMap<>();
-    for (State<S, T> state : states) {
-      for (S signal : state.transitions.keys()) {
-        statesBySignal.update(signal, v -> (v == null ? new LinearSet<State<S, T>>() : v).add(state));
-      }
-    }
+    ISet alphabet = alphabet();
 
-    for (State<S, T> state : states) {
-      if (state.defaultTransitions().size() > 0) {
-        for (S signal : statesBySignal.difference(state.transitions).keys()) {
-          statesBySignal.update(signal, v -> v.add(state));
-        }
-      }
-    }
+    IMap<Object, ISet<ISet<State<S, T>>>> waiting = new LinearMap<>();
+    ISet<ISet<State<S, T>>> splitters = LinearSet.<ISet<State<S, T>>>of(accept, LinearSet.of(State.REJECT)).remove(Sets.EMPTY);
+    alphabet.forEach(s -> waiting.put(s, LinearSet.from(splitters)));
 
-    // refine partitions
-    // https://en.wikipedia.org/wiki/DFA_minimization#Hopcroft.27s_algorithm
+    ISet<ISet<State<S, T>>> srcs = LinearSet.<ISet<State<S, T>>>of(
+            accept,
+            states.difference(accept).remove(State.REJECT),
+            LinearSet.of(State.REJECT))
+            .remove(Sets.EMPTY);
+
+    srcs = srcs.stream()
+            .map(s -> Utils.groupBy(s, State::tags).values())
+            .flatMap(IList::stream)
+            .collect(Sets.linearCollector());
+
     while (waiting.size() > 0) {
-      ISet<State<S, T>> a = waiting.elements().first();
-      waiting.remove(a);
+      IEntry<Object, ISet<ISet<State<S, T>>>> e = waiting.entries().first();
+      Object signal = e.key();
 
-      for (S signal : statesBySignal.keys()) {
-        ISet<State<S, T>> x = statesBySignal.get(signal).get().stream()
-                .filter(s -> s.transitions(signal).containsAny(a))
-                .collect(Sets.linearCollector());
+      ISet<ISet<State<S, T>>> dsts = e.value();
+      ISet<State<S, T>> dst = dsts.elements().first();
+      dsts.remove(dst);
 
-        for (ISet<State<S, T>> y : LinearList.from(partition.elements())) {
-          if (x.containsAny(y) && !x.containsAll(y)) {
-            ISet<State<S, T>> intersect = x.intersection(y);
-            ISet<State<S, T>> diff = y.difference(x);
-            partition.remove(y).add(intersect).add(diff);
+      ISet<State<S, T>> accumulator = new LinearSet<>();
 
-            if (waiting.contains(y)) {
-              waiting.remove(y).add(intersect).add(diff);
-            } else if (intersect.size() <= diff.size()) {
-              waiting.add(intersect);
-            } else {
-              waiting.add(diff);
-            }
+      for (ISet<State<S, T>> src : LinearList.from(srcs.elements())) {
+        ISet<State<S, T>> p = inverseTransitions.apply(dst, signal).intersection(src);
+        if (p.size() > 0 && p.size() < src.size()) {
+          ISet<State<S, T>> q = src.difference(p);
+
+          srcs.remove(src).add(p).add(q);
+          if (dsts.contains(src)) {
+            dsts.remove(src).add(p).add(q);
           }
+
+          (p.size() < q.size() ? p : q).forEach(accumulator::add);
         }
+      }
+
+      if (accumulator.size() > 0) {
+        for (Object s : alphabet) {
+          waiting.getOrCreate(s, LinearSet::new).add(accumulator);
+        }
+      }
+
+      if (dsts.size() == 0) {
+        waiting.remove(signal);
       }
     }
 
     LinearMap<State<S, T>, ISet<State<S, T>>> m = new LinearMap<>();
-    for (ISet<State<S, T>> set : partition) {
-      for (State<S, T> state : set) {
-        m.put(state, set);
-      }
+    for (ISet<State<S, T>> set : srcs) {
+      set.forEach(s -> m.put(s, set));
     }
     return m;
   }

@@ -33,4 +33,23 @@ public class Utils {
                     e -> f.apply(e.value()),
                     (int) map.size()));
   }
+
+  public static <K, V> IMap<K, ISet<V>> groupBy(Iterable<V> vals, Function<V, K> f) {
+    LinearMap<K, ISet<V>> m = new LinearMap<>();
+    vals.forEach(v -> m.getOrCreate(f.apply(v), LinearSet::new).add(v));
+    return m;
+  }
+
+  public static <V> IList<ISet<V>> partitionAll(Iterable<ISet<V>> sets, ISet<V> partition) {
+    IList<ISet<V>> accumulator = new LinearList<>();
+    for (ISet<V> set : sets) {
+      if (set.containsAny(partition) && !partition.containsAll(set)) {
+        accumulator.addLast(set.intersection(partition));
+        accumulator.addLast(set.difference(partition));
+      } else {
+        accumulator.addLast(set);
+      }
+    }
+    return accumulator;
+  }
 }
