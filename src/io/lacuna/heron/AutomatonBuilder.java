@@ -7,9 +7,14 @@ import java.util.Objects;
 import java.util.function.BiFunction;
 import java.util.function.BinaryOperator;
 import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
+import static io.lacuna.heron.Utils.zipMap;
 
 /**
- * @author ztellman
+ * @param <S> the signals that trigger transitions between states
+ * @param <T> the tags applied to states
  */
 public class AutomatonBuilder<S, T> {
 
@@ -35,6 +40,11 @@ public class AutomatonBuilder<S, T> {
 
   /// combinators
 
+  /**
+   * @param <S> the signals that trigger transitions between states
+   * @param <T> the tags applied to states
+   * @return an automaton that accepts any input
+   */
   public static <S, T> AutomatonBuilder<S, T> any() {
     State<S, T> a = new State<>();
     State<S, T> b = new State<>();
@@ -43,6 +53,11 @@ public class AutomatonBuilder<S, T> {
     return new AutomatonBuilder<>(a, LinearSet.of(a, b), LinearSet.of(b));
   }
 
+  /**
+   * @param <S> the signals that trigger transitions between states
+   * @param <T> the tags applied to states
+   * @return an automaton that rejects any input
+   */
   public static <S, T> AutomatonBuilder<S, T> none() {
     State<S, T> a = new State<>();
     a.addDefault(State.REJECT);
@@ -50,12 +65,18 @@ public class AutomatonBuilder<S, T> {
     return new AutomatonBuilder<S, T>(a, LinearSet.of(a, State.REJECT), LinearSet.of());
   }
 
+  /**
+   * @return the current builder, with the current accept states tagged as {@code tag}
+   */
   public AutomatonBuilder tag(T tag) {
     accept.forEach(s -> s.addTag(tag));
 
     return this;
   }
 
+  /**
+   * @return the current builder, extended to match {@code signal} after its current accept states
+   */
   public AutomatonBuilder match(S signal) {
     State<S, T> newState = new State<>();
     states.add(newState);
@@ -66,6 +87,9 @@ public class AutomatonBuilder<S, T> {
     return this;
   }
 
+  /**
+   * @return the current builder, extended to match anything but {@code signal} after its current accept states
+   */
   public AutomatonBuilder not(S signal) {
     State<S, T> newAccept = new State<>();
     for (State<S, T> s : accept) {
@@ -74,13 +98,15 @@ public class AutomatonBuilder<S, T> {
     }
 
     accept = LinearSet.of(newAccept);
-    states.add(newAccept);
-    states.add(State.REJECT);
+    states.add(newAccept).add(State.REJECT);
     deterministic = false;
 
     return this;
   }
 
+  /**
+   * @return the current builder, extended to match {@code builder} after its current accept states
+   */
   public AutomatonBuilder<S, T> concat(AutomatonBuilder<S, T> builder) {
     builder = builder.clone();
 
@@ -95,6 +121,9 @@ public class AutomatonBuilder<S, T> {
     return this;
   }
 
+  /**
+   * @return the current builder, updated to match its pattern zero or one times
+   */
   public AutomatonBuilder<S, T> maybe() {
     accept.add(init);
     deterministic = false;
@@ -102,16 +131,54 @@ public class AutomatonBuilder<S, T> {
     return this;
   }
 
+  /**
+   * @return the current builder, updated to match its pattern zero or more times
+   */
   public AutomatonBuilder<S, T> kleene() {
     accept.forEach(s -> s.addEpsilon(init));
     accept.add(init);
-    deterministic = false;
 
+    deterministic = false;
     toDFA();
 
     return this;
   }
 
+  /**
+   * @return the current builder, updated to match everything but its current pattern
+   */
+  public AutomatonBuilder<S, T> complement() {
+
+    toDFA();
+
+    State<S, T> newAccept = new State<>();
+    newAccept.addDefault(newAccept);
+
+    states.remove(State.REJECT);
+
+    for (State<S, T> state : states) {
+      if (state.defaultTransitions().size() == 0
+              || state.defaultTransitions().contains(State.REJECT)) {
+        state.defaultTransitions = LinearSet.of(newAccept);
+      }
+
+      state.transitions = Utils.mapVals(
+              state.transitions,
+              s -> s.contains(State.REJECT) ? s.remove(State.REJECT).add(newAccept) : s);
+    }
+
+    states.add(newAccept);
+    accept = states.difference(accept).add(newAccept);
+
+    deterministic = false;
+    toDFA();
+
+    return this;
+  }
+
+  /**
+   * @return the current builder, modified to match either its current pattern or the pattern specified by {@code builder}
+   */
   public AutomatonBuilder<S, T> union(AutomatonBuilder<S, T> builder) {
 
     toDFA();
@@ -134,16 +201,15 @@ public class AutomatonBuilder<S, T> {
             .union(this.accept)
             .union(b.accept);
 
-    if (accept.contains(State.REJECT)) {
-      throw new IllegalStateException();
-    }
-
     deterministic = false;
     toDFA();
 
     return this;
   }
 
+  /**
+   * @return the current builder, modified to match both its current pattern and the pattern specified by {@code builder}
+   */
   public AutomatonBuilder<S, T> intersection(AutomatonBuilder<S, T> builder) {
 
     toDFA();
@@ -164,16 +230,15 @@ public class AutomatonBuilder<S, T> {
             .map(IEntry::value)
             .collect(Sets.linearCollector());
 
-    if (accept.contains(State.REJECT)) {
-      throw new IllegalStateException();
-    }
-
     deterministic = false;
     toDFA();
 
     return this;
   }
 
+  /**
+   * @return the current builder, modified to match its current pattern, less the pattern specified by {@code builder}
+   */
   public AutomatonBuilder<S, T> difference(AutomatonBuilder<S, T> builder) {
 
     toDFA();
@@ -195,18 +260,25 @@ public class AutomatonBuilder<S, T> {
             .collect(Sets.linearCollector())
             .union(this.accept);
 
-    if (accept.contains(State.REJECT)) {
-      throw new IllegalStateException();
-    }
-
     deterministic = false;
     toDFA();
 
     return this;
   }
 
+  @Override
+  public AutomatonBuilder<S, T> clone() {
+    LinearMap<State<S, T>, State<S, T>> cache = new LinearMap<>();
+
+    return new AutomatonBuilder<>(
+            init.clone(cache),
+            Utils.map(states, s -> s.clone(cache)),
+            Utils.map(accept, s -> s.clone(cache)));
+  }
+
   ///
 
+  // reduces any divergent transitions to a single state
   public void toDFA() {
 
     if (deterministic) {
@@ -230,6 +302,7 @@ public class AutomatonBuilder<S, T> {
     deterministic = true;
   }
 
+  // collapses any equivalent states
   public void minimize() {
 
     LinearMap<ISet<State<S, T>>, ISet<State<S, T>>> cache = new LinearMap<>();
@@ -252,17 +325,19 @@ public class AutomatonBuilder<S, T> {
             .collect(Sets.linearCollector());
   }
 
-  private ISet alphabet() {
-    LinearSet alphabet = new LinearSet().add(OTHER_SIGNAL);
+
+  ISet<S> alphabet() {
+    LinearSet<S> alphabet = new LinearSet<>();
     for (State<S, T> s : states) {
       s.transitions.keys().forEach(alphabet::add);
     }
     return alphabet;
   }
 
+  // given a set of states and a signal, returns the set of states which follow that transition into the set
   private BiFunction<ISet<State<S, T>>, Object, ISet<State<S, T>>> inverseTransitions() {
 
-    ISet alphabet = alphabet();
+    ISet alphabet = ((ISet) alphabet()).add(OTHER_SIGNAL);
 
     IMap<State<S, T>, IMap<Object, ISet<State<S, T>>>> result = new LinearMap<>();
     states.stream().forEach(s -> result.put(s, new LinearMap<>()));
@@ -294,13 +369,14 @@ public class AutomatonBuilder<S, T> {
             .get();
   }
 
-  public IMap<State<S, T>, ISet<State<S, T>>> equivalentStates() {
+  //
+  private IMap<State<S, T>, ISet<State<S, T>>> equivalentStates() {
 
     toDFA();
 
     BiFunction<ISet<State<S, T>>, Object, ISet<State<S, T>>> inverseTransitions = inverseTransitions();
 
-    ISet alphabet = alphabet();
+    ISet alphabet = ((ISet) alphabet()).add(OTHER_SIGNAL);
 
     IMap<Object, ISet<ISet<State<S, T>>>> waiting = new LinearMap<>();
     ISet<ISet<State<S, T>>> splitters = LinearSet.<ISet<State<S, T>>>of(accept, LinearSet.of(State.REJECT)).remove(Sets.EMPTY);
@@ -328,8 +404,9 @@ public class AutomatonBuilder<S, T> {
       ISet<State<S, T>> accumulator = new LinearSet<>();
 
       for (ISet<State<S, T>> src : LinearList.from(srcs.elements())) {
-        ISet<State<S, T>> p = inverseTransitions.apply(dst, signal).intersection(src);
-        if (p.size() > 0 && p.size() < src.size()) {
+        ISet<State<S, T>> splitter = inverseTransitions.apply(dst, signal);
+        if (src.containsAny(splitter) && !splitter.containsAll(src)) {
+          ISet<State<S, T>> p = splitter.intersection(src);
           ISet<State<S, T>> q = src.difference(p);
 
           srcs.remove(src).add(p).add(q);
@@ -359,15 +436,83 @@ public class AutomatonBuilder<S, T> {
     return m;
   }
 
-  ///
+  // removes any references to the specified states
+  private void prune(ISet<State<S, T>> toRemove) {
 
-  @Override
-  public AutomatonBuilder<S, T> clone() {
-    LinearMap<State<S, T>, State<S, T>> cache = new LinearMap<>();
+    toDFA();
 
-    return new AutomatonBuilder<>(
-            init.clone(cache),
-            Utils.map(states, s -> s.clone(cache)),
-            Utils.map(accept, s -> s.clone(cache)));
+    states = states.difference(toRemove);
+
+    for (State<S, T> state : states) {
+      if (state.defaultTransitions().size() == 0) {
+        state.transitions = state.transitions.stream()
+                .filter(e -> !toRemove.containsAll(e.value()))
+                .collect(Maps.linearCollector(IEntry::key, IEntry::value));
+      } else {
+        IMap<S, ISet<State<S, T>>> cleaned = state.transitions.stream()
+                .filter(e -> toRemove.containsAll(e.value()))
+                .collect(Maps.linearCollector(IEntry::key, x -> LinearSet.of((State<S, T>) State.REJECT)));
+        if (cleaned.size() > 0) {
+          state.transitions = state.transitions.union(cleaned);
+          states.add(State.REJECT);
+        }
+
+        if (toRemove.containsAll(state.defaultTransitions())) {
+          state.defaultTransitions = null;
+        }
+      }
+    }
+  }
+
+  //
+  private ISet<State<S, T>> deadStates() {
+
+    toDFA();
+
+    IMap<State<S, T>, ISet<State<S, T>>> downstream =
+            zipMap(states.difference(accept).stream(),
+                    s -> s.transitions.values().stream()
+                            .flatMap(ISet::stream)
+                            .collect(Sets.linearCollector())
+                            .remove(s));
+
+    ISet<State<S, T>> dead = new LinearSet<>();
+
+    for (; ; ) {
+      ISet<State<S, T>> prevDead = dead;
+      dead = downstream.stream()
+              .filter(e -> prevDead.containsAll(e.value()))
+              .map(IEntry::key)
+              .collect(Sets.linearCollector())
+              .union(prevDead);
+
+      if (prevDead.size() == dead.size()) {
+        return dead;
+      }
+    }
+  }
+
+  IMap<State<S, T>, Integer> rankOrdering() {
+    ISet<State<S, T>> states = new LinearSet<>();
+    LinearList<State<S, T>> queue = LinearList.of(init);
+
+    while (queue.size() > 0) {
+      State<S, T> s = queue.popFirst();
+      if (!states.contains(s)) {
+        states.add(s);
+
+        s.transitions.values().stream()
+                .flatMap(ISet::stream)
+                .collect(Sets.linearCollector())
+                .difference(states)
+                .forEach(queue::addLast);
+      }
+    }
+
+    return IntStream.of((int) states.size())
+            .boxed()
+            .collect(Maps.linearCollector(
+                    n -> states.elements().nth(n),
+                    n -> n));
   }
 }

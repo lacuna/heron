@@ -34,6 +34,7 @@
         (let [gen-actions' (gen/resize (quot size 2) (gen/sized gen-actions))]
           [(gen/return [:kleene])
            (gen/return [:maybe])
+           (gen/return [:complement])
            (gen/tuple (gen/return :concat) (gen/vector gen-actions' 0 size))
            (gen/tuple (gen/return :union) (gen/vector gen-actions' 0 size))
            (gen/tuple (gen/return :intersection) (gen/vector gen-actions' 0 size))
@@ -48,6 +49,7 @@
             :not          (.not fsm arg)
             :kleene       (.kleene fsm)
             :maybe        (.maybe fsm)
+            :complement   (.complement fsm)
             :concat       (.concat fsm (construct-automaton arg))
             :union        (.union fsm (construct-automaton arg))
             :intersection (.intersection fsm (construct-automaton arg))
@@ -116,6 +118,17 @@
         (fn [s]
           (and (accepts? a' [])
             (accepts? a' s)))))))
+
+(def-generative-test test-complement [inputs actions]
+  (let [a        (construct-automaton actions)
+        a'       (doto (-> a .clone .complement) .toDFA)
+        inputs   (set inputs)
+        accepted (->> inputs (filter #(accepts? a %)) set)]
+    (= accepted
+      (set/difference inputs
+        (->> inputs
+          (filter #(accepts? a' %))
+          set)))))
 
 (def-generative-test test-union [inputs a b]
   (let [a      (construct-automaton a)

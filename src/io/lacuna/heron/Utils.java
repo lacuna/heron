@@ -3,11 +3,20 @@ package io.lacuna.heron;
 import io.lacuna.bifurcan.*;
 
 import java.util.function.Function;
+import java.util.stream.Stream;
 
 /**
  * @author ztellman
  */
 public class Utils {
+
+  public static <V> LinearSet<V> toSet(Stream<V> s) {
+    return s.collect(Sets.linearCollector());
+  }
+
+  public static <K, V> LinearMap<K, V> zipMap(Stream<K> s, Function<K, V> f) {
+    return s.collect(Maps.linearCollector(Function.identity(), f));
+  }
 
   public static <U, V> Function<U, V> memoize(Function<U, V> f) {
     LinearMap<U, V> cache = new LinearMap<>();
@@ -21,9 +30,7 @@ public class Utils {
     if (set == null) {
       return null;
     }
-    return set.stream()
-            .map(f)
-            .collect(Sets.linearCollector());
+    return toSet(set.stream().map(f));
   }
 
   public static <K, U, V> IMap<K, V> mapVals(IMap<K, U> map, Function<U, V> f) {

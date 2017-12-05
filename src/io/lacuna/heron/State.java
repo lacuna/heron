@@ -1,6 +1,7 @@
 package io.lacuna.heron;
 
 import io.lacuna.bifurcan.*;
+import io.lacuna.bifurcan.IMap.IEntry;
 
 import java.util.Iterator;
 import java.util.Optional;
@@ -23,8 +24,8 @@ public class State<S, T> {
   final long id = COUNTER.incrementAndGet();
 
   IMap<S, ISet<State<S, T>>> transitions;
+  ISet<State<S, T>> defaultTransitions = null;
   private ISet<State<S, T>> epsilonTransitions = null;
-  private ISet<State<S, T>> defaultTransitions = null;
   private ISet<T> tags = null;
 
   public State() {
@@ -80,7 +81,7 @@ public class State<S, T> {
   public ISet<S> signals(State<S, T> state) {
     return transitions.stream()
             .filter(e -> e.value().contains(state))
-            .map(e -> e.key())
+            .map(IEntry::key)
             .collect(Sets.linearCollector());
   }
 
